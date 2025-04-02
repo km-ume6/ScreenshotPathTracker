@@ -42,7 +42,7 @@ public class AppSettings
     }
 }
 
-public class CompleatedItem
+public class CompletedItem
 {
     public string ItemName { get; set; } = string.Empty;
     public DateTime TimeStamp { get; set; } = DateTime.Now;
@@ -51,9 +51,12 @@ public class CompleatedItem
 class Program
 {
     static AppSettings? settings = null;
-    static List<CompleatedItem>? compleatedFolders = null;
+    static List<CompletedItem>? completedFolders = null;
     static string completedFoldersList = string.Empty;
+    static List<CompletedItem>? completedFiles = null;
+    static string completedFilesList = string.Empty;
     static string TessDataFolder = string.Empty;
+    static string connectionString = string.Empty;
 
     static void Main(string[] args)
     {
@@ -82,15 +85,29 @@ class Program
             Environment.Exit(0);
         }
 
+        // 接続文字列の作成
+        connectionString = $"Server=192.168.11.15;Database=AOI;User Id={settings.DbUser};Password={settings.DbPassword};TrustServerCertificate=True;";
+
         // 処理済みフォルダリストの読み込み
         completedFoldersList = Path.Combine(ProgramDataFolder, "completedFoldersList.json");
         if (File.Exists(completedFoldersList))
         {
-            compleatedFolders = JsonSerializer.Deserialize<List<CompleatedItem>>(File.ReadAllText(completedFoldersList));
+            completedFolders = JsonSerializer.Deserialize<List<CompletedItem>>(File.ReadAllText(completedFoldersList));
         }
         else
         {
-            compleatedFolders = new List<CompleatedItem>();
+            completedFolders = new List<CompletedItem>();
+        }
+
+        // 処理済みファイルリストの読み込み
+        completedFilesList = Path.Combine(ProgramDataFolder, "completedFilesList.json");
+        if (File.Exists(completedFilesList))
+        {
+            completedFiles = JsonSerializer.Deserialize<List<CompletedItem>>(File.ReadAllText(completedFilesList));
+        }
+        else
+        {
+            completedFiles = new List<CompletedItem>();
         }
 
         // Tesseractのデータフォルダを確認
@@ -110,7 +127,9 @@ class Program
             foreach (var dir in directories)
             {
                 if (GetDeepestDirectoryName(dir).Length == "910963".Length)
+                {
                     LotFolders.Add(dir);
+                }
             }
         }
         else
@@ -140,10 +159,136 @@ class Program
         Console.WriteLine("開始：" + DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss"));
 
         FindScreenshot(LotFolders);
+        CsvToDatabase();
 
         // 終了時刻を表示
         Console.WriteLine("終了：" + DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss"));
 
+    }
+
+    static void CsvToDatabase()
+    {
+        if (settings == null)
+        {
+            return;
+        }
+
+        DateTime folderTimeStamp;
+
+        // csvFolder内の全てのcsvファイルをリストアップ
+        var csvFiles = Directory.GetFiles(settings.CsvFolder, "*.csv", SearchOption.AllDirectories);
+
+        foreach (var csvFile in csvFiles)
+        {
+            if (ShouldExitLoop())
+            {
+                return;
+            }
+
+            // 処理対象フォルダを表示
+            Console.Write(csvFile);
+
+            if (completedFiles != null)
+            {
+                folderTimeStamp = File.GetLastWriteTime(csvFile);
+                if (completedFiles.Exists(x => x.ItemName == csvFile && x.TimeStamp == folderTimeStamp))
+                {
+                    Console.WriteLine(" -> ファイルは処理済みです");
+                    continue;
+                }
+            }
+
+            // 改行出力
+            Console.WriteLine();
+
+            using (SqlConnection connection = new SqlConnection(connectionString))
+            {
+                connection.Open();
+
+                // csvFileを1行ずつ読込んで処理
+                using (var reader = new StreamReader(csvFile))
+                {
+                    // 1行目はヘッダー行なのでスキップする
+                    _ = reader.ReadLine();
+
+                    while (!reader.EndOfStream)
+                    {
+                        var line = reader.ReadLine();
+                        if (line == null)
+                        {
+                            continue;
+                        }
+
+                        var values = line.Split(',');
+                        Console.Write($"{values[4]}-{values[5]} -> ");
+
+                        // レコードが存在するか確認
+                        string selectQuery = "SELECT COUNT(*) FROM ResultAOI WHERE LOT = @lot AND SLOT = @slot";
+                        using (SqlCommand selectCommand = new SqlCommand(selectQuery, connection))
+                        {
+                            selectCommand.Parameters.AddWithValue("@lot", values[4]);
+                            selectCommand.Parameters.AddWithValue("@slot", values[5]);
+                            int count = (int)selectCommand.ExecuteScalar();
+
+                            // レコードが存在する場合、更新
+                            string query = string.Empty;
+                            if (count > 0)
+                            {
+                                query = "UPDATE ResultAOI SET Class020 = @class020, Class025 = @class025, Class029 = @class029, Class050 = @class050, Class104 = @class104, Class300 = @class300, Class500 = @class500, Total = @total, Judge = @judge, Comment = @comment WHERE LOT = @lot AND SLOT = @slot";
+                                Console.WriteLine("更新");
+                            }
+                            else
+                            {
+                                query = "INSERT INTO ResultAOI (LOT, SLOT, Class020, Class025, Class029, Class050, Class104, Class300, Class500, Total, Judge, Comment) VALUES (@lot, @slot, @class020, @class025, @class029, @class050, @class104, @class300, @class500, @total, @judge, @comment)";
+                                Console.WriteLine("新規登録");
+                            }
+
+                            using (SqlCommand sqlCommand = new SqlCommand(query, connection))
+                            {
+                                ExecuteSQL(sqlCommand, line);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // folderのタイムスタンプを取得する
+            folderTimeStamp = Directory.GetLastWriteTime(csvFile);
+
+            if (completedFiles != null)
+            {
+                var completedItem = completedFiles.Find(x => x.ItemName == csvFile);
+                if (completedItem != null)
+                {
+                    completedItem.TimeStamp = folderTimeStamp;
+                }
+                else
+                {
+                    completedFiles.Add(new CompletedItem { ItemName = csvFile, TimeStamp = folderTimeStamp });
+                }
+
+                var json = JsonSerializer.Serialize(completedFiles, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(completedFilesList, json);
+            }
+        }
+    }
+
+    static void ExecuteSQL(SqlCommand sqlCommand, string csvLine)
+    {
+        var values = csvLine.Split(',');
+        sqlCommand.Parameters.AddWithValue("@class020", int.Parse(values[6]));
+        sqlCommand.Parameters.AddWithValue("@class025", int.Parse(values[7]));
+        sqlCommand.Parameters.AddWithValue("@class029", int.Parse(values[8]));
+        sqlCommand.Parameters.AddWithValue("@class050", int.Parse(values[9]));
+        sqlCommand.Parameters.AddWithValue("@class104", int.Parse(values[10]));
+        sqlCommand.Parameters.AddWithValue("@class300", int.Parse(values[11]));
+        sqlCommand.Parameters.AddWithValue("@class500", int.Parse(values[12]));
+        sqlCommand.Parameters.AddWithValue("@total", int.Parse(values[13]));
+        sqlCommand.Parameters.AddWithValue("@judge", values[14]);
+        sqlCommand.Parameters.AddWithValue("@comment", values[15]);
+        sqlCommand.Parameters.AddWithValue("@lot", values[4]);
+        sqlCommand.Parameters.AddWithValue("@slot", values[5]);
+        sqlCommand.ExecuteNonQuery();
     }
 
     static string GetDeepestDirectoryName(string path)
@@ -158,7 +303,6 @@ class Program
             return;
         }
 
-        string connectionString = $"Server=192.168.11.15;Database=AOI;User Id={settings.DbUser};Password={settings.DbPassword};TrustServerCertificate=True;";
         string PassOrFail = string.Empty;
         string ParentFolder = string.Empty;
         string ParentFolderTemp = string.Empty;
@@ -178,10 +322,10 @@ class Program
             // 処理対象フォルダを表示
             Console.Write(folder);
 
-            if (compleatedFolders != null)
+            if (completedFolders != null)
             {
                 folderTimeStamp = Directory.GetLastWriteTime(folder);
-                if (compleatedFolders.Exists(x => x.ItemName == folder && x.TimeStamp == folderTimeStamp))
+                if (completedFolders.Exists(x => x.ItemName == folder && x.TimeStamp == folderTimeStamp))
                 {
                     Console.WriteLine(" -> フォルダは処理済みです");
                     continue;
@@ -263,11 +407,19 @@ class Program
             // folderのタイムスタンプを取得する
             folderTimeStamp = Directory.GetLastWriteTime(folder);
 
-            if (compleatedFolders != null)
+            if (completedFolders != null)
             {
-                compleatedFolders.Add(new CompleatedItem { ItemName = folder, TimeStamp = folderTimeStamp });
+                var completedItem = completedFolders.Find(x => x.ItemName == folder);
+                if (completedItem != null)
+                {
+                    completedItem.TimeStamp = folderTimeStamp;
+                }
+                else
+                {
+                    completedFolders.Add(new CompletedItem { ItemName = folder, TimeStamp = folderTimeStamp });
+                }
 
-                var json = JsonSerializer.Serialize(compleatedFolders, new JsonSerializerOptions { WriteIndented = true });
+                var json = JsonSerializer.Serialize(completedFolders, new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(completedFoldersList, json);
             }
         }
