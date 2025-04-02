@@ -1,0 +1,8 @@
+[ODBC]
+DRIVER=SQL Server
+UID=SangoKENSA
+DATABASE=AOI
+WSID=RE2024-7
+APP=Microsoft Office
+SERVER=192.168.11.15
+Description=AOI Screenshot

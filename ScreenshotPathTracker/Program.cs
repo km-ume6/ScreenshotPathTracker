@@ -10,7 +10,8 @@ using SqlDataReader = Microsoft.Data.SqlClient.SqlDataReader;
 
 public class AppSettings
 {
-    public string TargetFolder { get; set; } = string.Empty;
+    public string ScreenshotFolder { get; set; } = string.Empty;
+    public string CsvFolder { get; set; } = string.Empty;
     public string DbUser { get; set; } = string.Empty;
     public string DbPassword { get; set; } = string.Empty;
 
@@ -39,38 +40,27 @@ public class AppSettings
         var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(filePath, json);
     }
-    public static bool CheckFileInDatabase(string connectionString, string filePath)
-    {
-        using (SqlConnection connection = new SqlConnection(connectionString))
-        {
-            connection.Open();
-            string query = "SELECT COUNT(*) FROM ScreenshotList WHERE フルパス = @filePath";
-            using (SqlCommand command = new SqlCommand(query, connection))
-            {
-                command.Parameters.AddWithValue("@filePath", filePath);
-                int count = (int)command.ExecuteScalar();
-                return count > 0;
-            }
-        }
-    }
 }
 
-public class CompleatedFolder
+public class CompleatedItem
 {
-    public string FolderName { get; set; } = string.Empty;
+    public string ItemName { get; set; } = string.Empty;
     public DateTime TimeStamp { get; set; } = DateTime.Now;
 }
 
 class Program
 {
     static AppSettings? settings = null;
-    static List<CompleatedFolder>? compleatedFolders = null;
-    static string compleatedFolderList = string.Empty;
+    static List<CompleatedItem>? compleatedFolders = null;
+    static string completedFoldersList = string.Empty;
+    static string TessDataFolder = string.Empty;
 
     static void Main(string[] args)
     {
-        string exePath = AppDomain.CurrentDomain.BaseDirectory;
-        string jsonSettingsFilePath = Path.Combine(exePath, "appsettings.json");
+        string ProgramDataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), AppDomain.CurrentDomain.FriendlyName);
+
+        // 設定ファイルの読み込み
+        string jsonSettingsFilePath = Path.Combine(ProgramDataFolder, "settings.json");
         if (File.Exists(jsonSettingsFilePath))
         {
             settings = AppSettings.LoadFromFile(jsonSettingsFilePath);
@@ -78,25 +68,45 @@ class Program
         }
         else
         {
+            if (!Directory.Exists(ProgramDataFolder))
+            {
+                Directory.CreateDirectory(ProgramDataFolder);
+            }
+
             settings = new AppSettings();
             settings.SaveToFile(jsonSettingsFilePath);
-            Console.WriteLine("デフォルト設定をJSONファイルに保存しました。");
+            Console.WriteLine("デフォルト設定を下記ファイルに保存しました。内容を確認して再実行！");
+            Console.WriteLine(jsonSettingsFilePath);
+
+            // アプリケーションを終了
+            Environment.Exit(0);
         }
 
-        compleatedFolderList = Path.Combine(exePath, "compleatedFolderList.json");
-        if (File.Exists(compleatedFolderList))
+        // 処理済みフォルダリストの読み込み
+        completedFoldersList = Path.Combine(ProgramDataFolder, "completedFoldersList.json");
+        if (File.Exists(completedFoldersList))
         {
-            compleatedFolders = JsonSerializer.Deserialize<List<CompleatedFolder>>(File.ReadAllText(compleatedFolderList));
+            compleatedFolders = JsonSerializer.Deserialize<List<CompleatedItem>>(File.ReadAllText(completedFoldersList));
         }
         else
         {
-            compleatedFolders = new List<CompleatedFolder>();
+            compleatedFolders = new List<CompleatedItem>();
         }
 
-        List<string> LotFolders = new List<string>();
-        if (Directory.Exists(settings.TargetFolder))
+        // Tesseractのデータフォルダを確認
+        TessDataFolder = Path.Combine(ProgramDataFolder, "tessdata");
+        if (!Directory.Exists(TessDataFolder))
         {
-            var directories = Directory.GetDirectories(settings.TargetFolder);
+            Console.WriteLine("OCRに必要な下記フォルダが見つかりません。");
+            Console.WriteLine(TessDataFolder);
+            Environment.Exit(1);
+        }
+
+        // ロットフォルダのリストを取得
+        List<string> LotFolders = new List<string>();
+        if (Directory.Exists(settings.ScreenshotFolder))
+        {
+            var directories = Directory.GetDirectories(settings.ScreenshotFolder);
             foreach (var dir in directories)
             {
                 if (GetDeepestDirectoryName(dir).Length == "910963".Length)
@@ -115,26 +125,25 @@ class Program
             using (StreamWriter writer = new StreamWriter(logFilePath))
             {
                 Console.SetOut(writer);
-
-                // 開始時刻を表示
-                Console.WriteLine("開始：" + DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss"));
-
-                FindScreenshot(LotFolders);
-
-                // 終了時刻を表示
-                Console.WriteLine("終了：" + DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss"));
+                Run(LotFolders);
             }
         }
         else
         {
-            // 開始時刻を表示
-            Console.WriteLine("開始：" + DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss"));
-
-            FindScreenshot(LotFolders);
-
-            // 終了時刻を表示
-            Console.WriteLine("終了：" + DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss"));
+            Run(LotFolders);
         }
+    }
+
+    static void Run(List<string> LotFolders)
+    {
+        // 開始時刻を表示
+        Console.WriteLine("開始：" + DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss"));
+
+        FindScreenshot(LotFolders);
+
+        // 終了時刻を表示
+        Console.WriteLine("終了：" + DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss"));
+
     }
 
     static string GetDeepestDirectoryName(string path)
@@ -166,18 +175,20 @@ class Program
                 return;
             }
 
+            // 処理対象フォルダを表示
             Console.Write(folder);
 
             if (compleatedFolders != null)
             {
-                folderTimeStamp = Directory.GetCreationTime(folder);
-                if (compleatedFolders.Exists(x => x.FolderName == folder && x.TimeStamp == folderTimeStamp))
+                folderTimeStamp = Directory.GetLastWriteTime(folder);
+                if (compleatedFolders.Exists(x => x.ItemName == folder && x.TimeStamp == folderTimeStamp))
                 {
                     Console.WriteLine(" -> フォルダは処理済みです");
                     continue;
                 }
             }
 
+            // 改行出力
             Console.WriteLine();
 
             var directories = Directory.GetFiles(folder, "*.jpeg", SearchOption.AllDirectories);
@@ -215,7 +226,7 @@ class Program
                     AoiJudgement = csvFiles.Length != 0 ? "OK" : "NG";
                 }
 
-                Console.Write(file.Replace(settings.TargetFolder, "") + " ");
+                Console.Write(file.Replace(settings.ScreenshotFolder, "") + " ");
 
                 bool exists = fullPathList.Contains(file);
                 if (exists)
@@ -226,7 +237,7 @@ class Program
                 {
                     Console.WriteLine("ファイル名をデータベースに登録します");
 
-                    OcrJudgement = CountNgInRectangle(file, new Rectangle(1130, 170, 50, 160)) == 0 ? "OK" : "NG";
+                    OcrJudgement = CountWordInRectangle("NG", file, new Rectangle(1130, 170, 50, 160)) == 0 ? "OK" : "NG";
                     ImageDimensions = GetImageDimensions(file);
 
                     using (SqlConnection connection = new SqlConnection(connectionString))
@@ -250,15 +261,14 @@ class Program
             }
 
             // folderのタイムスタンプを取得する
-            folderTimeStamp = Directory.GetCreationTime(folder);
+            folderTimeStamp = Directory.GetLastWriteTime(folder);
 
             if (compleatedFolders != null)
             {
-                compleatedFolders.Add(new CompleatedFolder { FolderName = folder, TimeStamp = folderTimeStamp });
+                compleatedFolders.Add(new CompleatedItem { ItemName = folder, TimeStamp = folderTimeStamp });
 
                 var json = JsonSerializer.Serialize(compleatedFolders, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(compleatedFolderList, json);
-
+                File.WriteAllText(completedFoldersList, json);
             }
         }
     }
@@ -268,18 +278,18 @@ class Program
         if (Console.KeyAvailable)
         {
             Console.ReadKey(true); // キー入力を処理
-            return true; // ループを終了
+            return true;
         }
         return false;
     }
 
     public static List<string> GetLotInDatabase(string connectionString, string lotName)
     {
-        using (SqlConnection connection = new SqlConnection(connectionString))
+        using (SqlConnection connection = new(connectionString))
         {
             connection.Open();
             string query = "SELECT フルパス FROM ScreenshotList WHERE ロット = @lotName";
-            using (SqlCommand command = new SqlCommand(query, connection))
+            using (SqlCommand command = new(query, connection))
             {
                 command.Parameters.AddWithValue("@lotName", lotName);
                 using (SqlDataReader reader = command.ExecuteReader())
@@ -291,21 +301,6 @@ class Program
                     }
                     return list;
                 }
-            }
-        }
-    }
-
-    public static bool CheckFileInDatabase(string connectionString, string filePath)
-    {
-        using (SqlConnection connection = new SqlConnection(connectionString))
-        {
-            connection.Open();
-            string query = "SELECT COUNT(*) FROM ScreenshotList WHERE フルパス = @filePath";
-            using (SqlCommand command = new SqlCommand(query, connection))
-            {
-                command.Parameters.AddWithValue("@filePath", filePath);
-                int count = (int)command.ExecuteScalar();
-                return count > 0;
             }
         }
     }
@@ -340,7 +335,7 @@ class Program
             return string.Empty;
         }
     }
-    public static int CountNgInRectangle(string imagePath, Rectangle rectangle)
+    public static int CountWordInRectangle(string word, string imagePath, Rectangle rectangle)
     {
         if (!File.Exists(imagePath))
         {
@@ -357,13 +352,14 @@ class Program
             using (var pix = ConvertBitmapToPix(croppedBitmap))
             {
                 // OCRエンジンを使用して文字列を認識する
-                using (var ocrEngine = new TesseractEngine(@"./tessdata", "jpn", EngineMode.Default))
+                using (var ocrEngine = new TesseractEngine(TessDataFolder, "jpn", EngineMode.Default))
                 {
                     using (var page = ocrEngine.Process(pix))
                     {
                         var text = page.GetText();
-                        // "NG"の出現回数を数える
-                        int count = text.Split(new string[] { "NG" }, StringSplitOptions.None).Length - 1;
+
+                        // wordの出現回数を数える
+                        int count = text.Split(new string[] { word }, StringSplitOptions.None).Length - 1;
                         return count;
                     }
                 }
