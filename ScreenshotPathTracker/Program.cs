@@ -137,13 +137,14 @@ class Program
             Console.WriteLine("TargetFolderが存在しません。");
         }
 
-        // コマンドライン引数にファイル名が与えられた場合、標準出力をそのファイルにリダイレクト
+        // コマンドライン引数にファイル名が与えられた場合、標準出力とファイルの両方に出力
         if (args.Length > 0)
         {
             string logFilePath = args[0];
             using (StreamWriter writer = new StreamWriter(logFilePath))
+            using (var multiWriter = new MultiTextWriter(Console.Out, writer))
             {
-                Console.SetOut(writer);
+                Console.SetOut(multiWriter); // 標準出力をマルチライターに設定
                 Run(LotFolders);
             }
         }
@@ -151,6 +152,21 @@ class Program
         {
             Run(LotFolders);
         }
+
+        // コマンドライン引数にファイル名が与えられた場合、標準出力をそのファイルにリダイレクト
+        //if (args.Length > 0)
+        //{
+        //    string logFilePath = args[0];
+        //    using (StreamWriter writer = new StreamWriter(logFilePath))
+        //    {
+        //        Console.SetOut(writer);
+        //        Run(LotFolders);
+        //    }
+        //}
+        //else
+        //{
+        //    Run(LotFolders);
+        //}
     }
 
     static void Run(List<string> LotFolders)
