@@ -1,8 +1,10 @@
-﻿using System.Drawing;
-using System.Xml.Serialization;
+﻿using System.Data.SqlClient;
+using System.Drawing;
+using System.Text.Json;
 using Tesseract;
-using SqlCommand = Microsoft.Data.SqlClient.SqlCommand;
+using Microsoft.Data.SqlClient;
 using SqlConnection = Microsoft.Data.SqlClient.SqlConnection;
+using SqlCommand = Microsoft.Data.SqlClient.SqlCommand;
 using SqlDataReader = Microsoft.Data.SqlClient.SqlDataReader;
 
 
@@ -13,27 +15,30 @@ public class AppSettings
     public string DbUser { get; set; } = string.Empty;
     public string DbPassword { get; set; } = string.Empty;
 
-    public AppSettings() { }
+    public AppSettings()
+    {
+    }
 
     public static AppSettings LoadFromFile(string filePath)
     {
         if (!File.Exists(filePath))
-            throw new FileNotFoundException("設定ファイルが見つかりません。", filePath);
-
-        using (var stream = File.OpenRead(filePath))
         {
-            var serializer = new XmlSerializer(typeof(AppSettings));
-            return (AppSettings)serializer.Deserialize(stream)!;
+            throw new FileNotFoundException("設定ファイルが見つかりません。", filePath);
         }
+
+        var json = File.ReadAllText(filePath);
+        var settings = JsonSerializer.Deserialize<AppSettings>(json);
+        if (settings == null)
+        {
+            throw new InvalidOperationException("設定ファイルの読み込みに失敗しました。");
+        }
+        return settings;
     }
 
     public void SaveToFile(string filePath)
     {
-        using (var stream = File.Create(filePath))
-        {
-            var serializer = new XmlSerializer(typeof(AppSettings));
-            serializer.Serialize(stream, this);
-        }
+        var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(filePath, json);
     }
 }
 
@@ -58,7 +63,6 @@ class Program
         string ProgramDataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), AppDomain.CurrentDomain.FriendlyName);
 
         // 設定ファイルの読み込み
-        /*
         string jsonSettingsFilePath = Path.Combine(ProgramDataFolder, "settings.json");
         if (File.Exists(jsonSettingsFilePath))
         {
@@ -80,39 +84,11 @@ class Program
             // アプリケーションを終了
             Environment.Exit(0);
         }
-        */
-        string xmlSettingsFilePath = Path.Combine(ProgramDataFolder, "settings.xml");
-        if (File.Exists(xmlSettingsFilePath))
-        {
-            settings = AppSettings.LoadFromFile(xmlSettingsFilePath);
-            Console.WriteLine($"XML設定ファイルから読み込みました。\n{xmlSettingsFilePath}");
-
-            Console.WriteLine($"設定ファイルの内容:");
-            Console.WriteLine($"ScreenshotFolder: {settings.ScreenshotFolder}");
-            Console.WriteLine($"CsvFolder: {settings.CsvFolder}");
-            Console.WriteLine($"DbUser: {settings.DbUser}");
-            Console.WriteLine($"DbPassword: {settings.DbPassword}");
-        }
-        else
-        {
-            if (!Directory.Exists(ProgramDataFolder))
-            {
-                Directory.CreateDirectory(ProgramDataFolder);
-            }
-
-            settings = new AppSettings();
-            settings.SaveToFile(xmlSettingsFilePath);
-            Console.WriteLine("デフォルト設定を下記ファイルに保存しました。内容を確認して再実行！");
-            Console.WriteLine(xmlSettingsFilePath);
-
-            Environment.Exit(0);
-        }
 
         // 接続文字列の作成
         connectionString = $"Server=192.168.11.15;Database=AOI;User Id={settings.DbUser};Password={settings.DbPassword};TrustServerCertificate=True;";
 
         // 処理済みフォルダリストの読み込み
-        /*
         completedFoldersList = Path.Combine(ProgramDataFolder, "completedFoldersList.json");
         if (File.Exists(completedFoldersList))
         {
@@ -122,41 +98,12 @@ class Program
         {
             completedFolders = new List<CompletedItem>();
         }
-        */
-        completedFoldersList = Path.Combine(ProgramDataFolder, "completedFoldersList.xml");
-        if (File.Exists(completedFoldersList))
-        {
-            using (var stream = File.OpenRead(completedFoldersList))
-            {
-                var serializer = new XmlSerializer(typeof(List<CompletedItem>));
-                completedFolders = (List<CompletedItem>)serializer.Deserialize(stream)!;
-            }
-        }
-        else
-        {
-            completedFolders = new List<CompletedItem>();
-        }
 
         // 処理済みファイルリストの読み込み
-        /*
         completedFilesList = Path.Combine(ProgramDataFolder, "completedFilesList.json");
         if (File.Exists(completedFilesList))
         {
             completedFiles = JsonSerializer.Deserialize<List<CompletedItem>>(File.ReadAllText(completedFilesList));
-        }
-        else
-        {
-            completedFiles = new List<CompletedItem>();
-        }
-        */
-        completedFilesList = Path.Combine(ProgramDataFolder, "completedFilesList.xml");
-        if (File.Exists(completedFilesList))
-        {
-            using (var stream = File.OpenRead(completedFilesList))
-            {
-                var serializer = new XmlSerializer(typeof(List<CompletedItem>));
-                completedFiles = (List<CompletedItem>)serializer.Deserialize(stream)!;
-            }
         }
         else
         {
@@ -190,14 +137,13 @@ class Program
             Console.WriteLine("TargetFolderが存在しません。");
         }
 
-        // コマンドライン引数にファイル名が与えられた場合、標準出力とファイルの両方に出力
+        // コマンドライン引数にファイル名が与えられた場合、標準出力をそのファイルにリダイレクト
         if (args.Length > 0)
         {
             string logFilePath = args[0];
             using (StreamWriter writer = new StreamWriter(logFilePath))
-            using (var multiWriter = new MultiTextWriter(Console.Out, writer))
             {
-                Console.SetOut(multiWriter); // 標準出力をマルチライターに設定
+                Console.SetOut(writer);
                 Run(LotFolders);
             }
         }
@@ -222,22 +168,16 @@ class Program
 
     static void CsvToDatabase()
     {
-        if (settings == null || string.IsNullOrWhiteSpace(settings.CsvFolder))
+        if (settings == null)
         {
-            Console.WriteLine("CsvFolderの設定が空です。settings.xmlを確認してください。");
             return;
         }
 
-        if (!Directory.Exists(settings.CsvFolder))
-        {
-            Console.WriteLine($"CsvFolderが存在しません: {settings.CsvFolder}");
-            return;
-        }
+        DateTime folderTimeStamp;
 
         // csvFolder内の全てのcsvファイルをリストアップ
         var csvFiles = Directory.GetFiles(settings.CsvFolder, "*.csv", SearchOption.AllDirectories);
 
-        DateTime folderTimeStamp;
         foreach (var csvFile in csvFiles)
         {
             if (ShouldExitLoop())
@@ -327,15 +267,8 @@ class Program
                     completedFiles.Add(new CompletedItem { ItemName = csvFile, TimeStamp = folderTimeStamp });
                 }
 
-                /*
                 var json = JsonSerializer.Serialize(completedFiles, new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(completedFilesList, json);
-                */
-                using (var stream = File.Create(completedFilesList))
-                {
-                    var serializer = new XmlSerializer(typeof(List<CompletedItem>));
-                    serializer.Serialize(stream, completedFiles);
-                }
             }
         }
     }
@@ -486,15 +419,8 @@ class Program
                     completedFolders.Add(new CompletedItem { ItemName = folder, TimeStamp = folderTimeStamp });
                 }
 
-                /*
                 var json = JsonSerializer.Serialize(completedFolders, new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(completedFoldersList, json);
-                */
-                using (var stream = File.Create(completedFoldersList))
-                {
-                    var serializer = new XmlSerializer(typeof(List<CompletedItem>));
-                    serializer.Serialize(stream, completedFolders);
-                }
             }
         }
     }

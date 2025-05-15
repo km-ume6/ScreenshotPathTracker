@@ -9,6 +9,7 @@
 
 	<ItemGroup>
 	  <Compile Remove="orgProgram.cs" />
+	  <Compile Remove="Program-old.cs" />
 	</ItemGroup>
 
 	<ItemGroup>
