@@ -1,7 +1,8 @@
 {
   "profiles": {
     "ScreenshotPathTracker": {
-      "commandName": "Project"
+      "commandName": "Project",
+      "commandLineArgs": "result.log"
     }
   }
 }
